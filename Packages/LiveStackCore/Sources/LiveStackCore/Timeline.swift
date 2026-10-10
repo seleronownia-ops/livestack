@@ -15,6 +15,7 @@ public struct TimelineSpan: Equatable, Sendable {
     public let end: Double
     /// Indices of the items visible during the span. Two items means a transition, listed outgoing first.
     public let items: [Int]
+    public init(start: Double, end: Double, items: [Int]) { self.start = start; self.end = end; self.items = items }
     public var duration: Double { end - start }
     public var isTransition: Bool { items.count == 2 }
 }

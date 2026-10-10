@@ -29,7 +29,12 @@ jobs:
           echo "name=${NAME:-iPhone 16}" >> "$GITHUB_OUTPUT"
           echo "Using simulator: ${NAME:-iPhone 16}"
       - name: Build for the simulator
-        run: xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO
+        run: |
+          set -o pipefail
+          xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO 2>&1 | tee sim-build.log | (grep -E "error:|\*\* BUILD" || true)
+          status=${PIPESTATUS[0]}
+          python3 scripts/ci-report.py sim-build.log || true
+          test "$status" -eq 0
       - name: Unit and integration tests
         run: |
           set -o pipefail
