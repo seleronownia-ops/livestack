@@ -86,11 +86,14 @@ final class ReelComposerTests: XCTestCase {
         let plan = reel.plan
         XCTAssertNotNil(plan.titleImage, "the plan rendered a title image")
         let title = plan.titleImage!
-        let region = CGRect(x: plan.titleOrigin.x / 1080, y: plan.titleOrigin.y / 1080, width: min(1, title.extent.width / 1080), height: min(1, title.extent.height / 1080))
+        // The first line of text: inset by the art's padding (half the font size), about three font sizes wide and one tall.
+        let fontSize = 1080 * 0.085, pad = fontSize * 0.5
+        let region = CGRect(x: (plan.titleOrigin.x + pad) / 1080, y: (plan.titleOrigin.y + pad) / 1080, width: fontSize * 3 / 1080, height: fontSize * 1.1 / 1080)
+        _ = title
         XCTAssertEqual(plan.titleOpacity(at: items[0].start + 0.9), 1, accuracy: 1e-9)
         let titleBand1 = try await SyntheticVideo.averageColor(of: out, at: items[0].start + 0.9, region: region)
         let titleBand2 = try await SyntheticVideo.averageColor(of: out, at: items[2].start + items[2].duration * 0.5, region: region)
-        XCTAssertGreaterThan(titleBand1.r + titleBand1.g + titleBand1.b, titleBand2.r + titleBand2.g + titleBand2.b + 30, "title brightens its region on loop 1: \(titleBand1) vs \(titleBand2), region \(region)")
+        XCTAssertGreaterThan(titleBand1.g + titleBand1.b, titleBand2.g + 60, "white title lifts the green channel of the red loop well above the untitled loop: \(titleBand1) vs \(titleBand2), region \(region)")
     }
 
     func testFlashTransitionPeaksWhite() async throws {

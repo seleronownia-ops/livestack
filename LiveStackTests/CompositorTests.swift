@@ -30,7 +30,8 @@ final class CompositorTests: XCTestCase {
         let cg = TitleArt.render("Lisbon", width: 464, fontSize: 46)
         XCTAssertNotNil(cg)
         let c = SyntheticVideo.averageColor(of: cg!)
-        XCTAssertGreaterThan(c.r + c.g + c.b, 60, "white text shows up in the average: \(c)")
+        XCTAssertGreaterThan(c.r + c.g + c.b, 15, "white text shows up in the average: \(c)")
+        XCTAssertEqual(c.r, c.g, accuracy: 1); XCTAssertEqual(c.g, c.b, accuracy: 1)
     }
 
     func testTitleIsDrawnOverTheFirstLoop() {

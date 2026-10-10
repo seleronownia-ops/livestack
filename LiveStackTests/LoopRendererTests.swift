@@ -37,7 +37,8 @@ final class LoopRendererTests: XCTestCase {
         let endDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration - 0.04)
         let midDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration / 2)
         XCTAssertGreaterThan(midDiff, 12, "the circle moved between start and midpoint: \(midDiff)")
-        XCTAssertLessThan(endDiff, midDiff / 3, "first and last frame match (\(endDiff)) compared with the swing (\(midDiff))")
+        // A bounce ends on the frame after its first one (…3, 2, 1 then wraps to 0), so the ends are close, not identical.
+        XCTAssertLessThan(endDiff, midDiff / 2, "first and last frame are close (\(endDiff)) compared with the swing (\(midDiff))")
     }
 
     func testOrientationIsPreserved() async throws {
