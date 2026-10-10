@@ -46,9 +46,19 @@ jobs:
           test "$status" -eq 0
       - name: Build an unsigned device binary
         run: |
+          set -o pipefail
           xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -configuration Release -sdk iphoneos \
             -destination "generic/platform=iOS" -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" DEVELOPMENT_TEAM="" \
+            2>&1 | tee device-build.log | (grep -E "error:|warning: .*signing|\*\* BUILD" || true)
+          status=${PIPESTATUS[0]}
+          python3 scripts/ci-report.py device-build.log || true
+          if [ "$status" -ne 0 ]; then
+            echo "::error::device build failed with status $status; last lines follow"
+            tail -n 40 device-build.log | sed 's/^/::error::/'
+            exit "$status"
+          fi
+          ls -R build/Build/Products | head -20
           mkdir -p ipa/Payload
           cp -R build/Build/Products/Release-iphoneos/LiveStack.app ipa/Payload/
           (cd ipa && zip -qr ../LiveStack-unsigned.ipa Payload)
