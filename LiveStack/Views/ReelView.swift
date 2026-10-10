@@ -122,64 +122,28 @@ struct ReelView: View {
     }
 }
 
-/// The player layer plus a synchronized overlay layer carrying stickers, title and flashes.
+/// The player layer. Stickers, title and flashes are drawn by the compositor inside the video itself.
 struct ReelPlayerView: UIViewRepresentable {
     let player: AVPlayer
     let reel: ComposedReel
     let onTime: (Double) -> Void
 
-    func makeUIView(context: Context) -> ReelPlayerUIView {
-        let view = ReelPlayerUIView()
+    func makeUIView(context: Context) -> PlayerLayerView {
+        let view = PlayerLayerView()
         view.playerLayer.player = player
         view.playerLayer.videoGravity = .resizeAspect
+        view.backgroundColor = .black
         context.coordinator.observer = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { t in onTime(t.seconds) }
         return view
     }
 
-    func updateUIView(_ view: ReelPlayerUIView, context: Context) {
-        guard let item = player.currentItem else { view.setOverlay(nil, renderSize: reel.renderSize); return }
-        if context.coordinator.item !== item {
-            context.coordinator.item = item
-            let sync = AVSynchronizedLayer(playerItem: item)
-            sync.addSublayer(reel.makeOverlayLayer())
-            view.setOverlay(sync, renderSize: reel.renderSize)
-        }
-    }
+    func updateUIView(_ view: PlayerLayerView, context: Context) {}
 
-    static func dismantleUIView(_ view: ReelPlayerUIView, coordinator: Coordinator) {
+    static func dismantleUIView(_ view: PlayerLayerView, coordinator: Coordinator) {
         if let o = coordinator.observer { view.playerLayer.player?.removeTimeObserver(o) }
         view.playerLayer.player = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var item: AVPlayerItem?; var observer: Any? }
-}
-
-final class ReelPlayerUIView: UIView {
-    override class var layerClass: AnyClass { AVPlayerLayer.self }
-    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-    private var overlay: CALayer?
-    private var renderSize = CGSize(width: 1080, height: 1920)
-
-    func setOverlay(_ layer: CALayer?, renderSize: CGSize) {
-        overlay?.removeFromSuperlayer()
-        overlay = layer
-        self.renderSize = renderSize
-        if let layer { self.layer.addSublayer(layer) }
-        setNeedsLayout()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard let overlay else { return }
-        // Scale the render-sized overlay onto the video rect the player layer actually draws.
-        let rect = playerLayer.videoRect.isEmpty ? bounds : playerLayer.videoRect
-        let s = rect.width / renderSize.width
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        overlay.bounds = CGRect(origin: .zero, size: renderSize)
-        overlay.anchorPoint = .zero
-        overlay.position = rect.origin
-        overlay.transform = CATransform3DMakeScale(s, s, 1)
-        CATransaction.commit()
-    }
+    final class Coordinator { var observer: Any? }
 }

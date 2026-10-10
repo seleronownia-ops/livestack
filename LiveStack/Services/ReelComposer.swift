@@ -1,50 +1,245 @@
 import Foundation
 import AVFoundation
-import QuartzCore
+import CoreImage
 import UIKit
 import LiveStackCore
 
-/// The reel: loops laid on two alternating tracks, transitions as transform and opacity ramps,
-/// stickers, title and flashes as Core Animation layers that work both in the player and in the export.
+/// The reel: loops laid on two alternating tracks, rendered frame by frame by `ReelCompositor`,
+/// which draws transitions, camera motion, stickers, the title and flashes straight from the core maths.
+/// The same compositor runs in the preview player and in the export, so they cannot disagree.
 struct ComposedReel {
     let composition: AVMutableComposition
     let videoComposition: AVMutableVideoComposition
     let timeline: ReelTimeline
     let renderSize: CGSize
-    private let overlayBuilder: () -> CALayer
-
-    init(composition: AVMutableComposition, videoComposition: AVMutableVideoComposition, timeline: ReelTimeline, renderSize: CGSize, overlayBuilder: @escaping () -> CALayer) {
-        self.composition = composition
-        self.videoComposition = videoComposition
-        self.timeline = timeline
-        self.renderSize = renderSize
-        self.overlayBuilder = overlayBuilder
-    }
+    let plan: ReelRenderPlan
 
     var duration: Double { timeline.total }
 
-    /// A fresh overlay layer tree in render coordinates (origin top-left, like UIKit). Animations are in item time.
-    func makeOverlayLayer() -> CALayer { overlayBuilder() }
-
-    /// A player item for the live preview. Overlays go in an `AVSynchronizedLayer` on top of the player layer.
     func makePlayerItem() -> AVPlayerItem {
         let item = AVPlayerItem(asset: composition)
         item.videoComposition = videoComposition
         return item
     }
 
-    /// A copy of the video composition that bakes the overlays in, for export.
-    func exportVideoComposition() -> AVMutableVideoComposition {
-        let vc = videoComposition.mutableCopy() as! AVMutableVideoComposition
-        let parent = CALayer()
-        parent.frame = CGRect(origin: .zero, size: renderSize)
-        parent.isGeometryFlipped = true
-        let videoLayer = CALayer()
-        videoLayer.frame = parent.frame
-        parent.addSublayer(videoLayer)
-        parent.addSublayer(makeOverlayLayer())
-        vc.animationTool = AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: videoLayer, in: parent)
-        return vc
+    /// The export uses the very same video composition as the preview.
+    func exportVideoComposition() -> AVMutableVideoComposition { videoComposition }
+}
+
+/// Everything the compositor needs to draw any frame of the reel. Immutable once built.
+final class ReelRenderPlan {
+    struct Item {
+        let trackID: CMPersistentTrackID
+        let timeline: TimelineItem
+        /// Maps the decoded frame (natural size, origin top-left) to an upright picture with origin (0, 0).
+        let upright: CGAffineTransform
+        let naturalSize: CGSize
+        let orientedSize: Size
+        let motion: CameraMotion
+        let stickers: [StickerArt]
+    }
+    struct StickerArt {
+        let image: CIImage
+        let placement: StickerPlacement
+        let aspect: Double
+    }
+
+    let items: [Item]
+    let timeline: ReelTimeline
+    let settings: ReelSettings
+    let renderSize: CGSize
+    let titleImage: CIImage?
+    let titleOrigin: CGPoint
+
+    init(items: [Item], timeline: ReelTimeline, settings: ReelSettings, renderSize: CGSize) {
+        self.items = items
+        self.timeline = timeline
+        self.settings = settings
+        self.renderSize = renderSize
+        let W = renderSize.width, H = renderSize.height
+        titleOrigin = CGPoint(x: W * 0.07, y: H * 0.72)
+        if settings.showTitle, !settings.title.trimmingCharacters(in: .whitespaces).isEmpty, let cg = TitleArt.render(settings.title, width: W * 0.86, fontSize: W * 0.085) {
+            titleImage = CIImage(cgImage: cg)
+        } else {
+            titleImage = nil
+        }
+    }
+
+    /// Transform from the decoded frame into the render frame (origin top-left) at `time` for an item in `state`.
+    func frameTransform(item index: Int, time: Double, state: LayerState) -> CGAffineTransform {
+        let item = items[index]
+        let zoom = FitMath.zoomFactor(motion: item.motion, progress: item.timeline.progress(at: time)) * state.zoom
+        let fit = FitMath.transform(source: item.orientedSize, render: Size(width: renderSize.width, height: renderSize.height), mode: settings.fit, zoom: zoom, offsetX: state.offsetX)
+        return item.upright.concatenating(CGAffineTransform(a: fit.a, b: fit.b, c: fit.c, d: fit.d, tx: fit.tx, ty: fit.ty))
+    }
+
+    /// Opacity of the title at `t`: fades in after a beat and out before the first loop ends.
+    func titleOpacity(at t: Double) -> Double {
+        guard titleImage != nil, let first = timeline.items.first else { return 0 }
+        let show = min(first.end, max(2.2, first.duration))
+        let fadeIn = min(max((t - 0.25) / 0.4, 0), 1), fadeOut = min(max((show - t) / 0.4, 0), 1)
+        return min(fadeIn, fadeOut)
+    }
+}
+
+/// A video composition instruction that carries the plan and the loops on screen during its span.
+final class ReelInstruction: NSObject, AVVideoCompositionInstructionProtocol {
+    let timeRange: CMTimeRange
+    let enablePostProcessing = false
+    let containsTweening = true
+    let requiredSourceTrackIDs: [NSValue]?
+    let passthroughTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
+    /// Item indices on screen, outgoing first during a transition.
+    let itemIndices: [Int]
+    let plan: ReelRenderPlan
+
+    init(timeRange: CMTimeRange, itemIndices: [Int], plan: ReelRenderPlan) {
+        self.timeRange = timeRange
+        self.itemIndices = itemIndices
+        self.plan = plan
+        self.requiredSourceTrackIDs = itemIndices.map { NSNumber(value: plan.items[$0].trackID) }
+    }
+}
+
+/// Draws one output frame: the loops with their transforms and opacities, then stickers, title and flash.
+final class ReelCompositor: NSObject, AVVideoCompositing {
+    private let context = CIContext(options: [.cacheIntermediates: false, .name: "LiveStack"])
+    private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+
+    var sourcePixelBufferAttributes: [String: Any]? = [
+        kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+    ]
+    var requiredPixelBufferAttributesForRenderContext: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+    ]
+
+    func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {}
+
+    func startRequest(_ request: AVAsynchronousVideoCompositionRequest) {
+        guard let instruction = request.videoCompositionInstruction as? ReelInstruction else {
+            request.finish(with: LiveStackError.exportFailed("unexpected instruction"))
+            return
+        }
+        guard let output = request.renderContext.newPixelBuffer() else {
+            request.finish(with: LiveStackError.exportFailed("no output buffer"))
+            return
+        }
+        let image = Self.render(instruction: instruction, time: request.compositionTime.seconds) { trackID in
+            request.sourceFrame(byTrackID: trackID).map { CIImage(cvPixelBuffer: $0) }
+        }
+        context.render(image, to: output, bounds: CGRect(origin: .zero, size: instruction.plan.renderSize), colorSpace: colorSpace)
+        request.finish(withComposedVideoFrame: output)
+    }
+
+    /// Builds the frame as a Core Image graph. Core Image's origin is bottom-left, the plan's is top-left,
+    /// so every placement is flipped on the way in.
+    static func render(instruction: ReelInstruction, time t: Double, source: (CMPersistentTrackID) -> CIImage?) -> CIImage {
+        let plan = instruction.plan
+        let size = plan.renderSize
+        let rect = CGRect(origin: .zero, size: size)
+        var canvas = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: rect)
+        let timeline = plan.timeline
+
+        // Which loops are visible and in what state.
+        var layers: [(index: Int, state: LayerState)] = []
+        var flash = 0.0
+        if instruction.itemIndices.count == 2 {
+            let out = instruction.itemIndices[0], inc = instruction.itemIndices[1]
+            let a = timeline.items[out], b = timeline.items[inc]
+            let overlap = a.end - b.start
+            let raw = overlap > 0 ? min(max((t - b.start) / overlap, 0), 1) : 1
+            let states = TransitionMath.states(style: plan.settings.transition, rawProgress: raw)
+            layers = TransitionMath.incomingOnTop(style: plan.settings.transition)
+                ? [(out, states.outgoing), (inc, states.incoming)]
+                : [(inc, states.incoming), (out, states.outgoing)]
+            if plan.settings.transition == .flash { flash = TransitionMath.flashOpacity(rawProgress: raw) }
+        } else if let only = instruction.itemIndices.first {
+            layers = [(only, LayerState())]
+        }
+
+        for layer in layers where layer.state.opacity > 0.001 {
+            let item = plan.items[layer.index]
+            guard let frame = source(item.trackID) else { continue }
+            let transform = plan.frameTransform(item: layer.index, time: t, state: layer.state)
+            let flipped = flipY(height: frame.extent.height).concatenating(transform).concatenating(flipY(height: size.height))
+            var picture = frame.transformed(by: flipped).cropped(to: rect)
+            picture = picture.withOpacity(layer.state.opacity)
+            canvas = picture.composited(over: canvas)
+            // Stickers belong to their loop: same offset and opacity as the loop itself.
+            let tau = t - item.timeline.start
+            let progress = item.timeline.progress(at: t)
+            for art in item.stickers {
+                let pose = StickerMath.pose(art.placement, tau: tau, progress: progress)
+                let w = size.width * art.placement.size * pose.scale
+                let h = w / CGFloat(max(0.05, art.aspect))
+                guard w > 0.5, h > 0.5 else { continue }
+                let cx = size.width * (art.placement.x + pose.dx + layer.state.offsetX)
+                let cy = size.height - size.height * (art.placement.y + pose.dy)
+                let sticker = art.image
+                    .transformed(by: CGAffineTransform(translationX: -art.image.extent.midX, y: -art.image.extent.midY))
+                    .transformed(by: CGAffineTransform(scaleX: w / art.image.extent.width, y: h / art.image.extent.height))
+                    .transformed(by: CGAffineTransform(rotationAngle: -pose.rotationDegrees * .pi / 180))
+                    .transformed(by: CGAffineTransform(translationX: cx, y: cy))
+                    .cropped(to: rect)
+                canvas = sticker.withOpacity(layer.state.opacity).composited(over: canvas)
+            }
+        }
+
+        if let title = plan.titleImage {
+            let alpha = plan.titleOpacity(at: t)
+            if alpha > 0.001 {
+                let y = size.height - plan.titleOrigin.y - title.extent.height
+                canvas = title.transformed(by: CGAffineTransform(translationX: plan.titleOrigin.x, y: y)).cropped(to: rect).withOpacity(alpha).composited(over: canvas)
+            }
+        }
+        if flash > 0.001 {
+            canvas = CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: CGFloat(flash))).cropped(to: rect).composited(over: canvas)
+        }
+        return canvas
+    }
+
+    static func flipY(height: CGFloat) -> CGAffineTransform { CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: height) }
+}
+
+extension CIImage {
+    /// Fades the whole image, keeping colour premultiplied.
+    func withOpacity(_ alpha: Double) -> CIImage {
+        guard alpha < 0.999 else { return self }
+        let a = CGFloat(max(0, alpha))
+        return applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: a, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: a, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: a, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: a)
+        ])
+    }
+}
+
+/// Renders the reel title to an image once: heavy rounded type, white, soft shadow, short underline.
+enum TitleArt {
+    static func render(_ text: String, width: CGFloat, fontSize: CGFloat) -> CGImage? {
+        let descriptor = UIFont.systemFont(ofSize: fontSize, weight: .heavy).fontDescriptor.withDesign(.rounded) ?? UIFont.systemFont(ofSize: fontSize, weight: .heavy).fontDescriptor
+        let font = UIFont(descriptor: descriptor, size: fontSize)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.6)
+        shadow.shadowBlurRadius = fontSize * 0.25
+        shadow.shadowOffset = CGSize(width: 0, height: fontSize * 0.06)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white, .paragraphStyle: paragraph, .shadow: shadow]
+        let bounds = (text as NSString).boundingRect(with: CGSize(width: width, height: fontSize * 3), options: [.usesLineFragmentOrigin], attributes: attributes, context: nil)
+        let pad = fontSize * 0.5
+        let height = ceil(bounds.height) + pad * 2 + fontSize * 0.4
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: ceil(width) + pad * 2, height: height), format: format)
+        let image = renderer.image { _ in
+            (text as NSString).draw(with: CGRect(x: pad, y: pad, width: width, height: fontSize * 3), options: [.usesLineFragmentOrigin], attributes: attributes, context: nil)
+            UIColor.white.setFill()
+            UIBezierPath(rect: CGRect(x: pad, y: pad + ceil(bounds.height) + fontSize * 0.18, width: width * 0.18, height: max(3, fontSize * 0.06))).fill()
+        }
+        return image.cgImage
     }
 }
 
@@ -58,271 +253,40 @@ enum ReelComposer {
         let frame = settings.frame.size
         let renderSize = CGSize(width: frame.width, height: frame.height)
         let timeline = ReelTimeline.build(durations: inputs.map { $0.asset.duration }, transition: settings.transition, transitionLength: settings.transitionLength)
-
         let composition = AVMutableComposition()
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate))
+        videoComposition.customVideoCompositorClass = ReelCompositor.self
         guard !inputs.isEmpty else {
-            let vc = AVMutableVideoComposition()
-            vc.renderSize = renderSize
-            vc.frameDuration = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate))
-            return ComposedReel(composition: composition, videoComposition: vc, timeline: timeline, renderSize: renderSize, overlayBuilder: { CALayer() })
+            let plan = ReelRenderPlan(items: [], timeline: timeline, settings: settings, renderSize: renderSize)
+            return ComposedReel(composition: composition, videoComposition: videoComposition, timeline: timeline, renderSize: renderSize, plan: plan)
         }
         let tracks = [
             composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!,
             composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!
         ]
-        var sourceTransforms: [CGAffineTransform] = []
-        var orientedSizes: [Size] = []
+        var items: [ReelRenderPlan.Item] = []
         for (i, input) in inputs.enumerated() {
             let asset = AVURLAsset(url: input.asset.url)
             guard let srcTrack = try await asset.loadTracks(withMediaType: .video).first else { throw LiveStackError.noVideoTrack }
             let (natural, transform) = try await srcTrack.load(.naturalSize, .preferredTransform)
             let assetDuration = try await asset.load(.duration)
             let item = timeline.items[i]
-            let range = CMTimeRange(start: .zero, duration: assetDuration)
-            try tracks[i % 2].insertTimeRange(range, of: srcTrack, at: CMTime(seconds: item.start, preferredTimescale: 600))
-            // Map the natural frame into an upright rectangle with its origin at (0, 0).
+            try tracks[i % 2].insertTimeRange(CMTimeRange(start: .zero, duration: assetDuration), of: srcTrack, at: CMTime(seconds: item.start, preferredTimescale: 600))
             let oriented = CGRect(origin: .zero, size: natural).applying(transform)
             let upright = transform.concatenating(CGAffineTransform(translationX: -oriented.minX, y: -oriented.minY))
-            sourceTransforms.append(upright)
-            orientedSizes.append(Size(width: abs(oriented.width), height: abs(oriented.height)))
-        }
-
-        func layerTransform(index: Int, time: Double, state: LayerState) -> CGAffineTransform {
-            let item = timeline.items[index]
-            let zoom = FitMath.zoomFactor(motion: inputs[index].asset.spec.motion, progress: item.progress(at: time)) * state.zoom
-            let fit = FitMath.transform(source: orientedSizes[index], render: Size(width: renderSize.width, height: renderSize.height), mode: settings.fit, zoom: zoom, offsetX: state.offsetX)
-            return sourceTransforms[index].concatenating(CGAffineTransform(a: fit.a, b: fit.b, c: fit.c, d: fit.d, tx: fit.tx, ty: fit.ty))
-        }
-
-        var instructions: [AVMutableVideoCompositionInstruction] = []
-        let epsilon = 1e-4
-        for span in splitFlash(timeline.spans(), style: settings.transition) {
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: CMTime(seconds: span.start, preferredTimescale: 600), end: CMTime(seconds: span.end, preferredTimescale: 600))
-            var layers: [AVMutableVideoCompositionLayerInstruction] = []
-            if span.isTransition {
-                let out = span.items[0], inc = span.items[1]
-                let overlapStart = timeline.items[inc].start, overlapEnd = timeline.items[out].end
-                func raw(_ t: Double) -> Double { overlapEnd > overlapStart ? (t - overlapStart) / (overlapEnd - overlapStart) : 1 }
-                let s0 = TransitionMath.states(style: settings.transition, rawProgress: raw(span.start + epsilon))
-                let s1 = TransitionMath.states(style: settings.transition, rawProgress: raw(span.end - epsilon))
-                let outLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: tracks[out % 2])
-                outLayer.setTransformRamp(fromStart: layerTransform(index: out, time: span.start, state: s0.outgoing), toEnd: layerTransform(index: out, time: span.end, state: s1.outgoing), timeRange: instruction.timeRange)
-                outLayer.setOpacityRamp(fromStartOpacity: Float(s0.outgoing.opacity), toEndOpacity: Float(s1.outgoing.opacity), timeRange: instruction.timeRange)
-                let inLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: tracks[inc % 2])
-                inLayer.setTransformRamp(fromStart: layerTransform(index: inc, time: span.start, state: s0.incoming), toEnd: layerTransform(index: inc, time: span.end, state: s1.incoming), timeRange: instruction.timeRange)
-                inLayer.setOpacityRamp(fromStartOpacity: Float(s0.incoming.opacity), toEndOpacity: Float(s1.incoming.opacity), timeRange: instruction.timeRange)
-                layers = TransitionMath.incomingOnTop(style: settings.transition) ? [inLayer, outLayer] : [outLayer, inLayer]
-            } else {
-                let idx = span.items[0]
-                let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: tracks[idx % 2])
-                layer.setTransformRamp(fromStart: layerTransform(index: idx, time: span.start, state: LayerState()), toEnd: layerTransform(index: idx, time: span.end, state: LayerState()), timeRange: instruction.timeRange)
-                layer.setOpacity(1, at: instruction.timeRange.start)
-                layers = [layer]
+            let art = input.stickers.compactMap { s -> ReelRenderPlan.StickerArt? in
+                guard let cg = s.image.cgImage else { return nil }
+                return ReelRenderPlan.StickerArt(image: CIImage(cgImage: cg), placement: s.placement, aspect: s.aspect)
             }
-            instruction.layerInstructions = layers
-            instruction.backgroundColor = UIColor.black.cgColor
-            instructions.append(instruction)
+            items.append(ReelRenderPlan.Item(trackID: tracks[i % 2].trackID, timeline: item, upright: upright, naturalSize: natural,
+                                             orientedSize: Size(width: abs(oriented.width), height: abs(oriented.height)), motion: input.asset.spec.motion, stickers: art))
         }
-
-        let videoComposition = AVMutableVideoComposition()
-        videoComposition.renderSize = renderSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate))
-        videoComposition.instructions = instructions
-
-        let overlayInputs = inputs
-        let overlayTimeline = timeline
-        let overlaySettings = settings
-        let builder: () -> CALayer = {
-            OverlayBuilder.build(renderSize: renderSize, timeline: overlayTimeline, stickers: overlayInputs.map { $0.stickers }, settings: overlaySettings)
+        let plan = ReelRenderPlan(items: items, timeline: timeline, settings: settings, renderSize: renderSize)
+        videoComposition.instructions = timeline.spans().map { span in
+            ReelInstruction(timeRange: CMTimeRange(start: CMTime(seconds: span.start, preferredTimescale: 600), end: CMTime(seconds: span.end, preferredTimescale: 600)), itemIndices: span.items, plan: plan)
         }
-        return ComposedReel(composition: composition, videoComposition: videoComposition, timeline: timeline, renderSize: renderSize, overlayBuilder: builder)
-    }
-
-    /// Flash and cut jump in the middle of the overlap, so their transition spans are split there
-    /// to keep every ramp continuous.
-    static func splitFlash(_ spans: [TimelineSpan], style: TransitionStyle) -> [TimelineSpan] {
-        guard style == .flash || style == .cut else { return spans }
-        var out: [TimelineSpan] = []
-        for s in spans {
-            if s.isTransition {
-                let mid = (s.start + s.end) / 2
-                out.append(TimelineSpan(start: s.start, end: mid, items: s.items))
-                out.append(TimelineSpan(start: mid, end: s.end, items: s.items))
-            } else {
-                out.append(s)
-            }
-        }
-        return out
-    }
-}
-
-/// Builds the Core Animation layer tree for stickers, the title and flash transitions.
-/// Coordinates: origin top-left, in render pixels. Time: item time, offset by `AVCoreAnimationBeginTimeAtZero`.
-enum OverlayBuilder {
-    static func build(renderSize: CGSize, timeline: ReelTimeline, stickers: [[Sticker]], settings: ReelSettings) -> CALayer {
-        let root = CALayer()
-        root.frame = CGRect(origin: .zero, size: renderSize)
-        root.masksToBounds = true
-        let total = max(timeline.total, 0.01)
-        let W = renderSize.width, H = renderSize.height
-
-        for (i, item) in timeline.items.enumerated() where i < stickers.count {
-            for sticker in stickers[i] {
-                root.addSublayer(stickerLayer(sticker, item: item, total: total, W: W, H: H))
-            }
-        }
-        if settings.showTitle, !settings.title.trimmingCharacters(in: .whitespaces).isEmpty, let first = timeline.items.first {
-            root.addSublayer(titleLayer(settings.title, first: first, total: total, W: W, H: H))
-        }
-        if settings.transition == .flash {
-            let spans = timeline.spans().filter(\.isTransition)
-            if !spans.isEmpty { root.addSublayer(flashLayer(spans: spans, total: total, size: renderSize)) }
-        }
-        return root
-    }
-
-    static func visibility(from start: Double, to end: Double, total: Double) -> CAKeyframeAnimation {
-        let anim = CAKeyframeAnimation(keyPath: "opacity")
-        anim.calculationMode = .discrete
-        let s = max(0, min(1, start / total)), e = max(s, min(1, end / total))
-        // Key times must climb; drop the leading or trailing hidden stretch when it would be empty.
-        if s <= 0 && e >= 1 { anim.values = [1]; anim.keyTimes = [0, 1] }
-        else if s <= 0 { anim.values = [1, 0]; anim.keyTimes = [0, NSNumber(value: e), 1] }
-        else if e >= 1 { anim.values = [0, 1]; anim.keyTimes = [0, NSNumber(value: s), 1] }
-        else { anim.values = [0, 1, 0]; anim.keyTimes = [0, NSNumber(value: s), NSNumber(value: e), 1] }
-        anim.duration = total
-        anim.beginTime = AVCoreAnimationBeginTimeAtZero
-        anim.isRemovedOnCompletion = false
-        anim.fillMode = .both
-        return anim
-    }
-
-    static func stickerLayer(_ sticker: Sticker, item: TimelineItem, total: Double, W: CGFloat, H: CGFloat) -> CALayer {
-        let p = sticker.placement
-        let layer = CALayer()
-        let w = W * p.size
-        let h = w / CGFloat(max(0.05, sticker.aspect))
-        layer.bounds = CGRect(x: 0, y: 0, width: w, height: h)
-        layer.position = CGPoint(x: W * p.x, y: H * p.y)
-        layer.contents = sticker.image.cgImage
-        layer.contentsGravity = .resizeAspect
-        layer.contentsScale = 1
-        layer.opacity = 0
-        layer.setValue(p.rotationDegrees * .pi / 180, forKeyPath: "transform.rotation.z")
-        layer.add(visibility(from: item.start, to: item.end, total: total), forKey: "visible")
-
-        let begin = AVCoreAnimationBeginTimeAtZero + item.start
-        switch p.animation {
-        case .still:
-            break
-        case .pop:
-            let a = CAKeyframeAnimation(keyPath: "transform.scale")
-            a.values = [0.0, 1.15, 0.95, 1.0]
-            a.keyTimes = [0, 0.55, 0.8, 1]
-            a.duration = 0.45
-            a.beginTime = begin
-            a.isRemovedOnCompletion = false
-            a.fillMode = .both
-            layer.add(a, forKey: "pop")
-        case .float:
-            let a = sampled(keyPath: "position.y", period: 1 / 0.8, samples: 24) { CGFloat(sin($0 * 2 * .pi)) * 0.02 * H }
-            a.beginTime = begin
-            a.repeatDuration = item.duration
-            layer.add(a, forKey: "float")
-        case .wiggle:
-            let a = sampled(keyPath: "transform.rotation.z", period: 1 / 2.5, samples: 24) { CGFloat(sin($0 * 2 * .pi)) * 7 * .pi / 180 }
-            a.beginTime = begin
-            a.repeatDuration = item.duration
-            layer.add(a, forKey: "wiggle")
-        case .drift:
-            let a = CABasicAnimation(keyPath: "position.x")
-            a.fromValue = -0.07 * W
-            a.toValue = 0.07 * W
-            a.isAdditive = true
-            a.duration = max(0.01, item.duration)
-            a.beginTime = begin
-            a.isRemovedOnCompletion = false
-            a.fillMode = .both
-            layer.add(a, forKey: "drift")
-        }
-        return layer
-    }
-
-    /// An additive animation that follows `f(phase)` for one period and repeats.
-    static func sampled(keyPath: String, period: Double, samples: Int, f: (Double) -> CGFloat) -> CAKeyframeAnimation {
-        let a = CAKeyframeAnimation(keyPath: keyPath)
-        a.values = (0...samples).map { f(Double($0) / Double(samples)) }
-        a.keyTimes = (0...samples).map { NSNumber(value: Double($0) / Double(samples)) }
-        a.duration = period
-        a.isAdditive = true
-        a.calculationMode = .linear
-        a.isRemovedOnCompletion = false
-        a.fillMode = .both
-        return a
-    }
-
-    static func titleLayer(_ text: String, first: TimelineItem, total: Double, W: CGFloat, H: CGFloat) -> CALayer {
-        let group = CALayer()
-        group.frame = CGRect(x: 0, y: 0, width: W, height: H)
-        let size = W * 0.085
-        let descriptor = UIFont.systemFont(ofSize: size, weight: .heavy).fontDescriptor.withDesign(.rounded) ?? UIFont.systemFont(ofSize: size, weight: .heavy).fontDescriptor
-        let font = UIFont(descriptor: descriptor, size: size)
-        let textLayer = CATextLayer()
-        textLayer.string = text
-        textLayer.font = font
-        textLayer.fontSize = size
-        textLayer.foregroundColor = UIColor.white.cgColor
-        textLayer.alignmentMode = .left
-        textLayer.isWrapped = true
-        textLayer.truncationMode = .end
-        textLayer.contentsScale = 2
-        textLayer.frame = CGRect(x: W * 0.07, y: H * 0.72, width: W * 0.86, height: size * 2.4)
-        textLayer.shadowColor = UIColor.black.cgColor
-        textLayer.shadowOpacity = 0.6
-        textLayer.shadowRadius = size * 0.25
-        textLayer.shadowOffset = CGSize(width: 0, height: size * 0.06)
-        group.addSublayer(textLayer)
-        let bar = CALayer()
-        bar.backgroundColor = UIColor.white.cgColor
-        bar.frame = CGRect(x: W * 0.07, y: H * 0.72 + size * 1.45, width: W * 0.16, height: max(3, size * 0.06))
-        group.addSublayer(bar)
-
-        let show = min(first.end, max(2.2, first.duration))
-        let fade = 0.4
-        let a = CAKeyframeAnimation(keyPath: "opacity")
-        a.values = [0, 0, 1, 1, 0, 0]
-        a.keyTimes = [0, NSNumber(value: 0.25 / total), NSNumber(value: min(1, (0.25 + fade) / total)), NSNumber(value: min(1, max(0, show - fade) / total)), NSNumber(value: min(1, show / total)), 1]
-        a.duration = total
-        a.beginTime = AVCoreAnimationBeginTimeAtZero
-        a.isRemovedOnCompletion = false
-        a.fillMode = .both
-        group.opacity = 0
-        group.add(a, forKey: "title")
-        return group
-    }
-
-    static func flashLayer(spans: [TimelineSpan], total: Double, size: CGSize) -> CALayer {
-        let layer = CALayer()
-        layer.frame = CGRect(origin: .zero, size: size)
-        layer.backgroundColor = UIColor.white.cgColor
-        layer.opacity = 0
-        var values: [NSNumber] = [0]
-        var times: [NSNumber] = [0]
-        for s in spans {
-            let mid = (s.start + s.end) / 2
-            values += [0, 1, 0]
-            times += [NSNumber(value: s.start / total), NSNumber(value: mid / total), NSNumber(value: s.end / total)]
-        }
-        values.append(0); times.append(1)
-        let a = CAKeyframeAnimation(keyPath: "opacity")
-        a.values = values
-        a.keyTimes = times
-        a.duration = total
-        a.beginTime = AVCoreAnimationBeginTimeAtZero
-        a.isRemovedOnCompletion = false
-        a.fillMode = .both
-        layer.add(a, forKey: "flash")
-        return layer
+        return ComposedReel(composition: composition, videoComposition: videoComposition, timeline: timeline, renderSize: renderSize, plan: plan)
     }
 }

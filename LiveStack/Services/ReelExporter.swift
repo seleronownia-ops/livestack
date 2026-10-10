@@ -12,7 +12,7 @@ enum ReelExporter {
         guard let session = AVAssetExportSession(asset: reel.composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw LiveStackError.exportFailed("no export session")
         }
-        session.videoComposition = reel.exportVideoComposition()
+        session.videoComposition = reel.videoComposition
         session.outputURL = out
         session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true

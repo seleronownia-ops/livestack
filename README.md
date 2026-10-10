@@ -58,8 +58,8 @@ Photos library ──PHAssetResource (paired video)──▶ MotionAnalyzer ─�
    AVAssetReader decodes only the window ─▶ frames reordered by LoopPlan.playOrder ─▶ AVAssetWriter ─▶ loop.mp4 ◀─────┘
                                                                                                         │
 ReelComposer: two alternating tracks, ReelTimeline (core) places loops with overlap, per-span transform and opacity ramps
-              implement fade / slide / zoom / flash / cut, Ken Burns zoom, crop-to-fill or fit; stickers, title and flashes
-              are CALayers driven by item-time animations (AVSynchronizedLayer for preview, AVVideoCompositionCoreAnimationTool for export)
+              then a custom Core Image compositor (ReelCompositor) draws every frame: fade / slide / zoom / flash / cut, Ken Burns
+              zoom, crop-to-fill or fit, stickers, title and flashes, all from the core maths. The player and the export run the same compositor
                                                                                                         │
 ReelExporter: AVAssetExportSession ─▶ 1080-wide MP4 ─▶ Photos          ImageIO ─▶ looping GIF (per loop or whole reel)
 ```
