@@ -33,19 +33,17 @@ jobs:
       - name: Unit and integration tests
         run: |
           set -o pipefail
-          xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackTests CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult 2>&1 | tee unit-tests.log | grep -E "Test Case|Executed|error:|\*\* TEST" || true
-          test "${PIPESTATUS[0]}" -eq 0
-      - name: Report unit test failures as annotations
-        if: failure()
-        run: python3 scripts/ci-report.py unit-tests.log
+          xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackTests CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult 2>&1 | tee unit-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
+          status=${PIPESTATUS[0]}
+          python3 scripts/ci-report.py unit-tests.log || true
+          test "$status" -eq 0
       - name: UI smoke test
         run: |
           set -o pipefail
-          xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee ui-tests.log | grep -E "Test Case|Executed|error:|\*\* TEST" || true
-          test "${PIPESTATUS[0]}" -eq 0
-      - name: Report UI test failures as annotations
-        if: failure()
-        run: python3 scripts/ci-report.py ui-tests.log
+          xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee ui-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
+          status=${PIPESTATUS[0]}
+          python3 scripts/ci-report.py ui-tests.log || true
+          test "$status" -eq 0
       - name: Build an unsigned device binary
         run: |
           xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -configuration Release -sdk iphoneos \

@@ -29,6 +29,9 @@ for ln in errors[:40]:
         print(f"::error::{ln}")
 for ln in summary[-6:]:
     print(f"::notice::{ln}")
+passed = sum(1 for l in uniq if "Test Case" in l and " passed" in l)
+failed = sum(1 for l in uniq if "Test Case" in l and " failed" in l)
+print(f"::notice::test cases passed={passed} failed={failed}")
 
 if os.environ.get("GITHUB_STEP_SUMMARY"):
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
