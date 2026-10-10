@@ -33,21 +33,21 @@ jobs:
           set -o pipefail
           xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO 2>&1 | tee sim-build.log | (grep -E "error:|\*\* BUILD" || true)
           status=${PIPESTATUS[0]}
-          python3 scripts/ci-report.py sim-build.log || true
+          python3 scripts/ci-report.py sim-build.log "$status" || true
           test "$status" -eq 0
       - name: Unit and integration tests
         run: |
           set -o pipefail
           xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackTests CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult 2>&1 | tee unit-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
           status=${PIPESTATUS[0]}
-          python3 scripts/ci-report.py unit-tests.log || true
+          python3 scripts/ci-report.py unit-tests.log "$status" || true
           test "$status" -eq 0
       - name: UI smoke test
         run: |
           set -o pipefail
           xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee ui-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
           status=${PIPESTATUS[0]}
-          python3 scripts/ci-report.py ui-tests.log || true
+          python3 scripts/ci-report.py ui-tests.log "$status" || true
           test "$status" -eq 0
       - name: Build an unsigned device binary
         run: |
@@ -57,7 +57,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" DEVELOPMENT_TEAM="" \
             2>&1 | tee device-build.log | (grep -E "error:|warning: .*signing|\*\* BUILD" || true)
           status=${PIPESTATUS[0]}
-          python3 scripts/ci-report.py device-build.log || true
+          python3 scripts/ci-report.py device-build.log "$status" || true
           if [ "$status" -ne 0 ]; then
             echo "::error::device build failed with status $status; last lines follow"
             tail -n 40 device-build.log | sed 's/^/::error::/'

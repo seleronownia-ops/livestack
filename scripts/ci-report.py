@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Turns an xcodebuild log into GitHub annotations and a step summary, so failures are readable from the API."""
+"""Turns an xcodebuild log into GitHub annotations and a step summary, so failures are readable from the API.
+Usage: ci-report.py <log> [exit-status]"""
 import os, re, sys
 
 path = sys.argv[1]
-lines = open(path, errors="replace").read().splitlines()
+status = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+raw = open(path, errors="replace").read().splitlines()
+lines = [re.sub(r"^\S+T\S+Z ", "", ln).rstrip() for ln in raw]
+patterns = re.compile(r"(error|Error|ERROR|Test Case .* (failed|passed)|Executed \d+ tests|Fatal|crash|\*\* (TEST|BUILD)|Assertion|XCTAssert|unexpected exit|Unable to|failed|Failed|Timed out|xctest)")
+noise = re.compile(r"(warning:|note:|^\s*$|CompileSwift|SwiftCompile|Ld |ProcessInfoPlist|-- )")
 keep = []
-patterns = re.compile(r"(error:|Test Case .* (failed|passed)|Executed \d+ tests|Fatal error|crashed|\*\* TEST|Assertion|XCTAssert|Restarting after unexpected exit|Timed out)")
 for ln in lines:
-    ln = re.sub(r"^\S+T\S+Z ", "", ln)  # strip the runner timestamp
-    if patterns.search(ln) and "warning:" not in ln:
+    if patterns.search(ln) and not noise.search(ln):
         keep.append(ln.strip()[:600])
-
-# compress: one line per unique message, keep order
 seen, uniq = set(), []
 for ln in keep:
     if ln not in seen:
         seen.add(ln); uniq.append(ln)
 
-errors = [l for l in uniq if "error:" in l or "failed" in l or "Fatal" in l or "crashed" in l]
-summary = [l for l in uniq if "Executed" in l or "** TEST" in l]
+errors = [l for l in uniq if re.search(r"(error|Error|ERROR|failed|Failed|Fatal|crash|unexpected exit|Unable to|Timed out)", l)]
+summary = [l for l in uniq if "Executed" in l or "** TEST" in l or "** BUILD" in l]
+passed = sum(1 for l in uniq if "Test Case" in l and " passed" in l)
+failed = sum(1 for l in uniq if "Test Case" in l and " failed" in l)
 
 for ln in errors[:40]:
     m = re.match(r"(/[^:]+):(\d+):(\d+): error: (.*)", ln)
@@ -29,11 +32,13 @@ for ln in errors[:40]:
         print(f"::error::{ln}")
 for ln in summary[-6:]:
     print(f"::notice::{ln}")
-passed = sum(1 for l in uniq if "Test Case" in l and " passed" in l)
-failed = sum(1 for l in uniq if "Test Case" in l and " failed" in l)
-print(f"::notice::test cases passed={passed} failed={failed}")
+print(f"::notice::test cases passed={passed} failed={failed} status={status}")
+if status != 0:
+    tail = [l for l in lines if l.strip()][-45:]
+    for i in range(0, len(tail), 5):
+        print("::error::TAIL " + " ⏎ ".join(t[:160] for t in tail[i:i + 5]))
 
 if os.environ.get("GITHUB_STEP_SUMMARY"):
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
         fh.write("### xcodebuild report\n\n```\n" + "\n".join(errors[:80] + summary) + "\n```\n")
-print(f"report: {len(errors)} error lines, {len(summary)} summary lines", file=sys.stderr)
+print(f"report: {len(errors)} error lines, {len(summary)} summary lines, passed={passed} failed={failed}", file=sys.stderr)
