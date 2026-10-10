@@ -1,0 +1,60 @@
+# XcodeGen spec (fallback if the checked-in LiveStack.xcodeproj will not open on your Xcode):
+#   brew install xcodegen && xcodegen generate
+name: LiveStack
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+packages:
+  LiveStackCore:
+    path: Packages/LiveStackCore
+targets:
+  LiveStack:
+    type: application
+    platform: iOS
+    sources: [LiveStack]
+    dependencies:
+      - package: LiveStackCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Live Stack shows your Live Photos and reads their motion to make loops."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Live Stack saves finished reels and GIFs to your library."
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        ENABLE_PREVIEWS: YES
+  LiveStackTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [LiveStackTests]
+    dependencies:
+      - target: LiveStack
+      - package: LiveStackCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+  LiveStackUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [LiveStackUITests]
+    dependencies:
+      - target: LiveStack
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+schemes:
+  LiveStack:
+    build:
+      targets:
+        LiveStack: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [LiveStackTests, LiveStackUITests]

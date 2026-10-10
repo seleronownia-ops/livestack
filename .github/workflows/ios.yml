@@ -1,0 +1,56 @@
+name: iOS checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  core:
+    name: Core package tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path Packages/LiveStackCore
+
+  ios:
+    name: App build, tests and unsigned IPA (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode 16 on the runner
+        run: |
+          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XC" ] && sudo xcode-select -s "$XC" || true
+          xcodebuild -version
+      - name: Pick a simulator
+        id: sim
+        run: |
+          NAME=$(xcrun simctl list devices available | grep -E "iPhone (16|15)" | head -1 | sed -E 's/^ *([^(]+) \(.*/\1/' | sed 's/ *$//')
+          echo "name=${NAME:-iPhone 16}" >> "$GITHUB_OUTPUT"
+          echo "Using simulator: ${NAME:-iPhone 16}"
+      - name: Build for the simulator
+        run: xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO
+      - name: Unit and integration tests
+        run: xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackTests CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult
+      - name: UI smoke test
+        run: xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackUITests CODE_SIGNING_ALLOWED=NO
+      - name: Build an unsigned device binary
+        run: |
+          xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -configuration Release -sdk iphoneos \
+            -destination "generic/platform=iOS" -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+          mkdir -p ipa/Payload
+          cp -R build/Build/Products/Release-iphoneos/LiveStack.app ipa/Payload/
+          (cd ipa && zip -qr ../LiveStack-unsigned.ipa Payload)
+          ls -la LiveStack-unsigned.ipa
+      - name: Upload the IPA (sign and install it with Sideloadly or AltStore)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveStack-unsigned-ipa
+          path: LiveStack-unsigned.ipa
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults.xcresult
