@@ -13,8 +13,8 @@ final class LoopRendererTests: XCTestCase {
         let src = try makeSource()
         let spec = LoopSpec(windowStart: 1.0, windowLength: 0.5, mode: .bounce, speed: 1, repeats: 2)
         let loop = try await LoopRenderer.shared.render(sourceURL: src, spec: spec)
-        // 15 frames forward + 13 back, twice, at 30 fps
-        XCTAssertEqual(loop.duration, Double(28 * 2) / 30.0, accuracy: 0.07)
+        // 15 frames forward + 13 back, twice, at 30 fps; allow one frame of slack per pass at the window edges
+        XCTAssertEqual(loop.duration, Double(28 * 2) / 30.0, accuracy: 4.0 / 30.0 + 0.01)
         XCTAssertEqual(loop.spec, spec.clamped(toSourceDuration: 3))
         let written = AVURLAsset(url: loop.url)
         let track = try await written.loadTracks(withMediaType: .video).first
@@ -33,16 +33,11 @@ final class LoopRendererTests: XCTestCase {
         // Circle moves from 1.5 s. A bounce over 1.5...2.0 should put the circle at the same place at the start and the end.
         let src = try makeSource()
         let loop = try await LoopRenderer.shared.render(sourceURL: src, spec: LoopSpec(windowStart: 1.5, windowLength: 0.5, mode: .bounce, speed: 1, repeats: 1))
-        let first = try await SyntheticVideo.averageColor(of: loop.url, at: 0.01)
-        let last = try await SyntheticVideo.averageColor(of: loop.url, at: loop.duration - 0.04)
-        let mid = try await SyntheticVideo.averageColor(of: loop.url, at: loop.duration / 2)
-        // Same frame at both ends (the circle returns), and the middle is the far end of the swing.
-        XCTAssertEqual(first.r, last.r, accuracy: 12); XCTAssertEqual(first.g, last.g, accuracy: 12); XCTAssertEqual(first.b, last.b, accuracy: 12)
-        // Compare left and right halves: the circle sits in a different half at the midpoint than at the start.
-        let startLeft = try await SyntheticVideo.averageColor(of: loop.url, at: 0.01, region: CGRect(x: 0, y: 0, width: 0.5, height: 1))
-        let midLeft = try await SyntheticVideo.averageColor(of: loop.url, at: loop.duration / 2, region: CGRect(x: 0, y: 0, width: 0.5, height: 1))
-        XCTAssertGreaterThan(abs(startLeft.r - midLeft.r) + abs(startLeft.g - midLeft.g) + abs(startLeft.b - midLeft.b), 20, "the circle moved between start and midpoint")
-        _ = mid
+        // Same picture at both ends (the circle returns), a clearly different one at the far end of the swing.
+        let endDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration - 0.04)
+        let midDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration / 2)
+        XCTAssertLessThan(endDiff, 4, "first and last frame match: \(endDiff)")
+        XCTAssertGreaterThan(midDiff, 5, "the circle moved between start and midpoint: \(midDiff)")
     }
 
     func testOrientationIsPreserved() async throws {

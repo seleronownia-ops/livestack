@@ -87,6 +87,14 @@ jobs:
         run: |
           mkdir -p out
           for f in *.log; do [ -f "$f" ] && gzip -c "$f" > "out/$f.gz"; done
+          # crash reports from the simulator's test host, and the structured test summary
+          for f in ~/Library/Logs/DiagnosticReports/*.ips ~/Library/Logs/DiagnosticReports/*.crash; do
+            [ -f "$f" ] && gzip -c "$f" > "out/crash-$(basename "$f").gz"
+          done
+          if [ -d TestResults.xcresult ]; then
+            xcrun xcresulttool get test-results tests --path TestResults.xcresult > out/xcresult-tests.json 2>/dev/null || true
+            gzip -f out/xcresult-tests.json || true
+          fi
           echo "sha=${{ github.sha }} run=${{ github.run_id }} $(date -u)" > out/INFO.txt
           cd out && git init -q && git checkout -q -b ci-logs && git add . \
             && git -c user.name=ci -c user.email=ci@example.com commit -q -m "logs for ${{ github.sha }} run ${{ github.run_id }}" \

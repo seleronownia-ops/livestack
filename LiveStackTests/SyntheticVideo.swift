@@ -103,6 +103,35 @@ enum SyntheticVideo {
         return (r / n, g / n, b / n)
     }
 
+    /// Mean absolute per-pixel difference (0...255, averaged over RGB) between two frames of a video.
+    static func frameDifference(of url: URL, between t1: Double, and t2: Double) async throws -> Double {
+        let asset = AVURLAsset(url: url)
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.requestedTimeToleranceBefore = .zero
+        gen.requestedTimeToleranceAfter = .zero
+        let a = try await gen.image(at: CMTime(seconds: t1, preferredTimescale: 600)).image
+        let b = try await gen.image(at: CMTime(seconds: t2, preferredTimescale: 600)).image
+        let pa = rgbBytes(of: a), pb = rgbBytes(of: b)
+        var sum = 0
+        for i in 0..<min(pa.count, pb.count) { sum += abs(Int(pa[i]) - Int(pb[i])) }
+        return Double(sum) / Double(max(1, min(pa.count, pb.count)))
+    }
+
+    static func rgbBytes(of image: CGImage) -> [UInt8] {
+        let w = 32, h = 32
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        bytes.withUnsafeMutableBytes { ptr in
+            let ctx = CGContext(data: ptr.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.interpolationQuality = .low
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        var out: [UInt8] = []
+        out.reserveCapacity(w * h * 3)
+        for i in stride(from: 0, to: bytes.count, by: 4) { out.append(bytes[i]); out.append(bytes[i + 1]); out.append(bytes[i + 2]) }
+        return out
+    }
+
     /// Hue (0...1) of an average colour.
     static func hue(_ c: (r: Double, g: Double, b: Double)) -> Double {
         var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0

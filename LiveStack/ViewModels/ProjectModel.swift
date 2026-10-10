@@ -203,7 +203,8 @@ final class ProjectModel: ObservableObject {
             let composed = try await ReelComposer.compose(inputs: inputs, settings: settings)
             reel = composed
             let wasPlaying = player.rate > 0
-            let position = player.currentTime()
+            let current = player.currentTime()
+            let position = (current.isValid && current.isNumeric) ? current : .zero
             player.removeAllItems()
             if !inputs.isEmpty {
                 let item = composed.makePlayerItem()

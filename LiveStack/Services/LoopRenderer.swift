@@ -41,6 +41,7 @@ actor LoopRenderer {
         guard reader.canAdd(output) else { throw LiveStackError.readerFailed("cannot add output") }
         reader.add(output)
         let halfFrame = 0.5 / sourceFPS
+        let quarterFrame = 0.25 / sourceFPS
         reader.timeRange = CMTimeRange(start: CMTime(seconds: max(0, start - halfFrame), preferredTimescale: 600),
                                        duration: CMTime(seconds: length + 2 * halfFrame, preferredTimescale: 600))
         guard reader.startReading() else { throw LiveStackError.readerFailed(reader.error?.localizedDescription ?? "start failed") }
@@ -48,7 +49,8 @@ actor LoopRenderer {
         while let sample = output.copyNextSampleBuffer() {
             let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
-            if pts >= start - halfFrame && pts < start + length - halfFrame * 0.5 {
+            // Frames whose timestamp lands inside the window, with a quarter frame of slack at both ends.
+            if pts >= start - quarterFrame && pts < start + length - quarterFrame {
                 frames.append((pts, buffer))
             }
         }
