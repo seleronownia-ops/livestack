@@ -33,9 +33,11 @@ final class ReelComposerTests: XCTestCase {
         let reel = try await ReelComposer.compose(inputs: loops.map { .init(asset: $0, stickers: []) }, settings: settings)
         let out = try await ReelExporter.exportVideo(reel, to: SyntheticVideo.tempURL("reel", "mp4"))
         let exported = AVURLAsset(url: out)
-        XCTAssertEqual(try await exported.load(.duration).seconds, reel.duration, accuracy: 0.1)
+        let exportedDuration = try await exported.load(.duration).seconds
+        XCTAssertEqual(exportedDuration, reel.duration, accuracy: 0.1)
         let track = try await exported.loadTracks(withMediaType: .video).first!
-        XCTAssertEqual(try await track.load(.naturalSize), CGSize(width: 1080, height: 1080))
+        let exportedSize = try await track.load(.naturalSize)
+        XCTAssertEqual(exportedSize, CGSize(width: 1080, height: 1080))
         for (i, item) in reel.timeline.items.enumerated() {
             let c = try await SyntheticVideo.averageColor(of: out, at: item.start + item.duration / 2)
             let hue = SyntheticVideo.hue(c)
