@@ -29,7 +29,7 @@ final class ReelComposerTests: XCTestCase {
 
     func testExportedReelShowsEachLoopInOrder() async throws {
         let loops = try await makeLoops()
-        let settings = ReelSettings(frame: .square, fit: .fill, transition: .fade, transitionLength: 0.3)
+        let settings = ReelSettings(frame: .square, fit: .fill, transition: .fade, transitionLength: 0.3, frameRate: 10)
         let reel = try await ReelComposer.compose(inputs: loops.map { .init(asset: $0, stickers: []) }, settings: settings)
         let out = try await ReelExporter.exportVideo(reel, to: SyntheticVideo.tempURL("reel", "mp4"))
         let exported = AVURLAsset(url: out)
@@ -54,7 +54,7 @@ final class ReelComposerTests: XCTestCase {
 
     func testSlideTransitionShowsBothSides() async throws {
         let loops = try await makeLoops()
-        let settings = ReelSettings(frame: .square, fit: .fill, transition: .slide, transitionLength: 0.5)
+        let settings = ReelSettings(frame: .square, fit: .fill, transition: .slide, transitionLength: 0.5, frameRate: 10)
         let reel = try await ReelComposer.compose(inputs: loops.map { .init(asset: $0, stickers: []) }, settings: settings)
         let out = try await ReelExporter.exportVideo(reel, to: SyntheticVideo.tempURL("slide", "mp4"))
         let b = reel.timeline.items[1]
@@ -73,7 +73,7 @@ final class ReelComposerTests: XCTestCase {
         let white = UIGraphicsGetImageFromCurrentImageContext()!
         UIGraphicsEndImageContext()
         let sticker = Sticker(image: white, placement: StickerPlacement(x: 0.2, y: 0.2, size: 0.3, rotationDegrees: 0, animation: .still))
-        let settings = ReelSettings(frame: .square, fit: .fill, transition: .cut, transitionLength: 0, title: "Lisbon", showTitle: true)
+        let settings = ReelSettings(frame: .square, fit: .fill, transition: .cut, transitionLength: 0, title: "Lisbon", showTitle: true, frameRate: 10)
         let inputs = loops.enumerated().map { ReelComposer.Input(asset: $0.element, stickers: $0.offset == 0 ? [sticker] : []) }
         let reel = try await ReelComposer.compose(inputs: inputs, settings: settings)
         let out = try await ReelExporter.exportVideo(reel, to: SyntheticVideo.tempURL("stick", "mp4"))
@@ -82,15 +82,20 @@ final class ReelComposerTests: XCTestCase {
         XCTAssertGreaterThan(onFirst.r + onFirst.g + onFirst.b, 3 * 200, "white sticker covers the top-left of loop 1: \(onFirst)")
         let onSecond = try await SyntheticVideo.averageColor(of: out, at: items[1].start + items[1].duration * 0.5, region: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
         XCTAssertLessThan(onSecond.r + onSecond.g + onSecond.b, 3 * 200, "sticker is gone on loop 2: \(onSecond)")
-        // Title band (lower left) on loop 1 contains white text pixels, so it is brighter than the same band on loop 2.
-        let titleBand1 = try await SyntheticVideo.averageColor(of: out, at: items[0].start + 0.9, region: CGRect(x: 0.05, y: 0.70, width: 0.6, height: 0.14))
-        let titleBand2 = try await SyntheticVideo.averageColor(of: out, at: items[2].start + items[2].duration * 0.5, region: CGRect(x: 0.05, y: 0.70, width: 0.6, height: 0.14))
-        XCTAssertGreaterThan(titleBand1.r + titleBand1.g + titleBand1.b, titleBand2.r + titleBand2.g + titleBand2.b + 30, "title brightens the band on loop 1: \(titleBand1) vs \(titleBand2)")
+        // The title's own region on loop 1 contains white text, so it is brighter than the same region on loop 3 (blue, no title).
+        let plan = reel.plan
+        XCTAssertNotNil(plan.titleImage, "the plan rendered a title image")
+        let title = plan.titleImage!
+        let region = CGRect(x: plan.titleOrigin.x / 1080, y: plan.titleOrigin.y / 1080, width: min(1, title.extent.width / 1080), height: min(1, title.extent.height / 1080))
+        XCTAssertEqual(plan.titleOpacity(at: items[0].start + 0.9), 1, accuracy: 1e-9)
+        let titleBand1 = try await SyntheticVideo.averageColor(of: out, at: items[0].start + 0.9, region: region)
+        let titleBand2 = try await SyntheticVideo.averageColor(of: out, at: items[2].start + items[2].duration * 0.5, region: region)
+        XCTAssertGreaterThan(titleBand1.r + titleBand1.g + titleBand1.b, titleBand2.r + titleBand2.g + titleBand2.b + 30, "title brightens its region on loop 1: \(titleBand1) vs \(titleBand2), region \(region)")
     }
 
     func testFlashTransitionPeaksWhite() async throws {
         let loops = try await makeLoops()
-        let settings = ReelSettings(frame: .square, fit: .fill, transition: .flash, transitionLength: 0.5)
+        let settings = ReelSettings(frame: .square, fit: .fill, transition: .flash, transitionLength: 0.5, frameRate: 10)
         let reel = try await ReelComposer.compose(inputs: loops.map { .init(asset: $0, stickers: []) }, settings: settings)
         let out = try await ReelExporter.exportVideo(reel, to: SyntheticVideo.tempURL("flash", "mp4"))
         let b = reel.timeline.items[1]

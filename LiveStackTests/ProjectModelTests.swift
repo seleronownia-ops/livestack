@@ -44,6 +44,7 @@ final class ProjectModelTests: XCTestCase {
 
     func testExportVideoAndGIF() async throws {
         let model = ProjectModel()
+        model.settings.frameRate = 10
         let src = try SyntheticVideo.write(to: SyntheticVideo.tempURL("exp"), scenes: [.init(hue: 0.8, seconds: 2, motion: nil)])
         await model.importVideoFile(src)
         try await Task.sleep(nanoseconds: 600_000_000)

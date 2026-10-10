@@ -31,14 +31,13 @@ final class LoopRendererTests: XCTestCase {
 
     func testBounceGoesOutAndBack() async throws {
         // Circle moves from 1.5 s. A bounce over 1.5...2.0 should put the circle at the same place at the start and the end.
-        let src = try makeSource()
+        let src = try SyntheticVideo.write(to: SyntheticVideo.tempURL("bounce"), scenes: [.init(hue: 0.55, seconds: 3, motion: 1.5...2.0)], circleRadius: 0.2)
         let loop = try await LoopRenderer.shared.render(sourceURL: src, spec: LoopSpec(windowStart: 1.5, windowLength: 0.5, mode: .bounce, speed: 1, repeats: 1))
         // Same picture at both ends (the circle returns), a clearly different one at the far end of the swing.
         let endDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration - 0.04)
         let midDiff = try await SyntheticVideo.frameDifference(of: loop.url, between: 0.01, and: loop.duration / 2)
-        XCTAssertLessThan(endDiff, 8, "first and last frame match: \(endDiff)")
-        XCTAssertGreaterThan(midDiff, 8, "the circle moved between start and midpoint: \(midDiff)")
-        XCTAssertGreaterThan(midDiff, endDiff * 2, "the swing is much larger than compression noise")
+        XCTAssertGreaterThan(midDiff, 12, "the circle moved between start and midpoint: \(midDiff)")
+        XCTAssertLessThan(endDiff, midDiff / 3, "first and last frame match (\(endDiff)) compared with the swing (\(midDiff))")
     }
 
     func testOrientationIsPreserved() async throws {

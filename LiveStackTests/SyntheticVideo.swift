@@ -14,7 +14,7 @@ enum SyntheticVideo {
     }
 
     @discardableResult
-    static func write(to url: URL, scenes: [Scene], fps: Int32 = 30, size: CGSize = CGSize(width: 480, height: 640)) throws -> URL {
+    static func write(to url: URL, scenes: [Scene], fps: Int32 = 30, size: CGSize = CGSize(width: 480, height: 640), circleRadius: CGFloat = 0.12) throws -> URL {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -36,7 +36,7 @@ enum SyntheticVideo {
                 let t = Double(k) / Double(fps)
                 let moving = scene.motion.map { $0.contains(t) } ?? false
                 let phase = moving ? t * 4 : 0
-                let buffer = try pixelBuffer(size: size, hue: scene.hue, phase: phase, pool: adaptor.pixelBufferPool)
+                let buffer = try pixelBuffer(size: size, hue: scene.hue, phase: phase, radius: circleRadius, pool: adaptor.pixelBufferPool)
                 while !input.isReadyForMoreMediaData { usleep(1000) }
                 adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: fps))
                 frame += 1
@@ -51,7 +51,7 @@ enum SyntheticVideo {
         return url
     }
 
-    static func pixelBuffer(size: CGSize, hue: CGFloat, phase: Double, pool: CVPixelBufferPool?) throws -> CVPixelBuffer {
+    static func pixelBuffer(size: CGSize, hue: CGFloat, phase: Double, radius: CGFloat = 0.12, pool: CVPixelBufferPool?) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
         if let pool { CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) }
         if buffer == nil {
@@ -65,7 +65,7 @@ enum SyntheticVideo {
                             bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue)!
         ctx.setFillColor(UIColor(hue: hue, saturation: 0.85, brightness: 0.75, alpha: 1).cgColor)
         ctx.fill(CGRect(origin: .zero, size: size))
-        let r = size.width * 0.12
+        let r = size.width * radius
         let cx = size.width / 2 + cos(phase) * size.width * 0.3, cy = size.height / 2 + sin(phase) * size.height * 0.3
         ctx.setFillColor(UIColor.white.cgColor)
         ctx.fillEllipse(in: CGRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r))
