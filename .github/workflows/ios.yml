@@ -1,4 +1,6 @@
 name: iOS checks
+permissions:
+  contents: write
 on:
   push:
   pull_request:
@@ -15,6 +17,9 @@ jobs:
   ios:
     name: App build, tests and unsigned IPA (macOS)
     runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Select the newest Xcode 16 on the runner
@@ -33,6 +38,7 @@ jobs:
           set -o pipefail
           xcodebuild build -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" CODE_SIGNING_ALLOWED=NO 2>&1 | tee sim-build.log | (grep -E "error:|\*\* BUILD" || true)
           status=${PIPESTATUS[0]}
+          echo "xcodebuild exit status: $status"
           python3 scripts/ci-report.py sim-build.log "$status" || true
           test "$status" -eq 0
       - name: Unit and integration tests
@@ -40,6 +46,7 @@ jobs:
           set -o pipefail
           xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackTests CODE_SIGNING_ALLOWED=NO -resultBundlePath TestResults.xcresult 2>&1 | tee unit-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
           status=${PIPESTATUS[0]}
+          echo "xcodebuild exit status: $status"
           python3 scripts/ci-report.py unit-tests.log "$status" || true
           test "$status" -eq 0
       - name: UI smoke test
@@ -47,6 +54,7 @@ jobs:
           set -o pipefail
           xcodebuild test -project LiveStack.xcodeproj -scheme LiveStack -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" -only-testing:LiveStackUITests CODE_SIGNING_ALLOWED=NO 2>&1 | tee ui-tests.log | (grep -E "Test Case|Executed|error:|\*\* TEST" || true)
           status=${PIPESTATUS[0]}
+          echo "xcodebuild exit status: $status"
           python3 scripts/ci-report.py ui-tests.log "$status" || true
           test "$status" -eq 0
       - name: Build an unsigned device binary
@@ -57,6 +65,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" DEVELOPMENT_TEAM="" \
             2>&1 | tee device-build.log | (grep -E "error:|warning: .*signing|\*\* BUILD" || true)
           status=${PIPESTATUS[0]}
+          echo "xcodebuild exit status: $status"
           python3 scripts/ci-report.py device-build.log "$status" || true
           if [ "$status" -ne 0 ]; then
             echo "::error::device build failed with status $status; last lines follow"
@@ -73,6 +82,15 @@ jobs:
         with:
           name: LiveStack-unsigned-ipa
           path: LiveStack-unsigned.ipa
+      - name: Publish logs to the ci-logs branch
+        if: always()
+        run: |
+          mkdir -p out
+          for f in *.log; do [ -f "$f" ] && gzip -c "$f" > "out/$f.gz"; done
+          echo "sha=${{ github.sha }} run=${{ github.run_id }} $(date -u)" > out/INFO.txt
+          cd out && git init -q && git checkout -q -b ci-logs && git add . \
+            && git -c user.name=ci -c user.email=ci@example.com commit -q -m "logs for ${{ github.sha }} run ${{ github.run_id }}" \
+            && git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" ci-logs
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
